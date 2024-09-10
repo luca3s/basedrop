@@ -13,7 +13,9 @@ use core::ptr::NonNull;
 ///
 /// [`Collector`]: crate::Collector
 /// [`Handle`]: crate::Handle
-pub struct Owned<T> {
+#[repr(transparent)]
+#[derive(std::marker::SmartPointer)]
+pub struct Owned<T: ?Sized> {
     node: NonNull<Node<T>>,
     phantom: PhantomData<T>,
 }
@@ -60,7 +62,7 @@ impl<T> DerefMut for Owned<T> {
     }
 }
 
-impl<T> Drop for Owned<T> {
+impl<T: ?Sized> Drop for Owned<T> {
     fn drop(&mut self) {
         unsafe {
             Node::queue_drop(self.node.as_ptr());

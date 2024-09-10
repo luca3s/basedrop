@@ -27,7 +27,7 @@ union NodeLink {
 /// [`Owned`]: crate::Owned
 /// [`Shared`]: crate::Shared
 #[repr(C)]
-pub struct Node<T> {
+pub struct Node<T: ?Sized> {
     header: NodeHeader,
     /// The data stored in this allocation.
     pub data: T,
@@ -68,7 +68,7 @@ impl<T: Send + 'static> Node<T> {
     }
 }
 
-impl<T> Node<T> {
+impl<T: ?Sized> Node<T> {
     /// Adds a `Node` to its associated [`Collector`]'s drop queue. The `Node`
     /// and its contained data may be dropped at a later time when
     /// [`Collector::collect`] or [`Collector::collect_one`] is called.

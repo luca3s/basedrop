@@ -15,12 +15,14 @@ use core::sync::atomic::{AtomicUsize, Ordering, fence};
 ///
 /// [`Collector`]: crate::Collector
 /// [`Handle`]: crate::Handle
-pub struct Shared<T> {
+#[repr(transparent)]
+#[derive(std::marker::SmartPointer)]
+pub struct Shared<T: ?Sized> {
     pub(crate) node: NonNull<Node<SharedInner<T>>>,
     pub(crate) phantom: PhantomData<SharedInner<T>>,
 }
 
-pub(crate) struct SharedInner<T> {
+pub(crate) struct SharedInner<T: ?Sized> {
     count: AtomicUsize,
     data: T,
 }
@@ -98,7 +100,7 @@ impl<T> Deref for Shared<T> {
     }
 }
 
-impl<T> Drop for Shared<T> {
+impl<T: ?Sized> Drop for Shared<T> {
     fn drop(&mut self) {
         unsafe {
             let count = self.node.as_ref().data.count.fetch_sub(1, Ordering::Release);
