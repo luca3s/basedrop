@@ -1,5 +1,6 @@
 use crate::{Handle, Node};
 
+use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::ops::Deref;
 use core::ptr::NonNull;
@@ -98,6 +99,12 @@ impl<T> Deref for Shared<T> {
     }
 }
 
+impl<T: Debug> Debug for Shared<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Shared").field("value", self.deref()).finish()
+    }
+}
+
 impl<T> Drop for Shared<T> {
     fn drop(&mut self) {
         unsafe {
@@ -113,9 +120,10 @@ impl<T> Drop for Shared<T> {
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
     use crate::{Collector, Shared};
 
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::{sync::atomic::{AtomicUsize, Ordering}, fmt::Write};
 
     #[test]
     fn shared() {
@@ -160,5 +168,15 @@ mod tests {
 
         let _y = Shared::clone(&x);
         assert!(Shared::get_mut(&mut x).is_none());
+    }
+
+    #[test]
+    fn debug() {
+        let collector = Collector::new();
+        let x = Shared::new(&collector.handle(), 3);
+
+        let mut w = alloc::string::String::new();
+        write!(&mut w, "{x:?}").unwrap();
+        assert_eq!(w, "Shared { value: 3 }");
     }
 }

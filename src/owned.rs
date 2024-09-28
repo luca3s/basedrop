@@ -1,5 +1,6 @@
 use crate::{Handle, Node};
 
+use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
@@ -60,10 +61,35 @@ impl<T> DerefMut for Owned<T> {
     }
 }
 
+impl<T: Debug> Debug for Owned<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Owned").field("value", &self.deref()).finish()
+    }
+}
+
 impl<T> Drop for Owned<T> {
     fn drop(&mut self) {
         unsafe {
             Node::queue_drop(self.node.as_ptr());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate alloc;
+
+    use core::fmt::Write;
+
+    use crate::{Collector, Owned};
+
+    #[test]
+    fn debug() {
+        let collector = Collector::new();
+        let x = Owned::new(&collector.handle(), 3);
+
+        let mut w = alloc::string::String::new();
+        write!(&mut w, "{x:?}").unwrap();
+        assert_eq!(w, "Owned { value: 3 }");
     }
 }
