@@ -1,5 +1,6 @@
 use crate::{Handle, Node};
 
+use core::marker::SmartPointer;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
@@ -13,13 +14,15 @@ use core::ptr::NonNull;
 ///
 /// [`Collector`]: crate::Collector
 /// [`Handle`]: crate::Handle
-pub struct Owned<T> {
+#[derive(SmartPointer)]
+#[repr(transparent)]
+pub struct Owned<#[pointee] T: ?Sized> {
     node: NonNull<Node<T>>,
     phantom: PhantomData<T>,
 }
 
-unsafe impl<T: Send> Send for Owned<T> {}
-unsafe impl<T: Sync> Sync for Owned<T> {}
+unsafe impl<T: Send + ?Sized> Send for Owned<T> {}
+unsafe impl<T: Sync + ?Sized> Sync for Owned<T> {}
 
 impl<T: Send + 'static> Owned<T> {
     /// Constructs a new `Owned<T>`.
@@ -39,14 +42,14 @@ impl<T: Send + 'static> Owned<T> {
     }
 }
 
-impl<T: Clone + Send + 'static> Clone for Owned<T> {
+impl<T: Clone + Send + 'static + ?Sized> Clone for Owned<T> {
     fn clone(&self) -> Self {
         let handle = unsafe { Node::handle(self.node.as_ptr()) };
         Owned::new(&handle, self.deref().clone())
     }
 }
 
-impl<T> Deref for Owned<T> {
+impl<T: ?Sized> Deref for Owned<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -54,16 +57,34 @@ impl<T> Deref for Owned<T> {
     }
 }
 
-impl<T> DerefMut for Owned<T> {
+impl<T: ?Sized> DerefMut for Owned<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut self.node.as_mut().data }
     }
 }
 
-impl<T> Drop for Owned<T> {
+impl<T: ?Sized> Drop for Owned<T> {
     fn drop(&mut self) {
         unsafe {
             Node::queue_drop(self.node.as_ptr());
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use core::any::Any;
+    use crate::{Collector, Owned};
+
+    #[test]
+    fn unsize_dyn() {
+        let mut collector = Collector::new();
+        let shared: Owned<[u8]> = Owned::new(&collector.handle(), [0, 1, 2, 3]);
+        let any: Owned<dyn Any> = Owned::new(&collector.handle(), 3u8);
+
+        drop(shared);
+        drop(any);
+        collector.collect();
+        assert!(collector.try_cleanup().is_ok());
     }
 }

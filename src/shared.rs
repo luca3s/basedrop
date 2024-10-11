@@ -1,4 +1,5 @@
 use crate::{Handle, Node};
+use core::marker::SmartPointer;
 
 use core::marker::PhantomData;
 use core::ops::Deref;
@@ -15,18 +16,20 @@ use core::sync::atomic::{AtomicUsize, Ordering, fence};
 ///
 /// [`Collector`]: crate::Collector
 /// [`Handle`]: crate::Handle
-pub struct Shared<T> {
+#[derive(SmartPointer)]
+#[repr(transparent)]
+pub struct Shared<#[pointee] T: ?Sized> {
     pub(crate) node: NonNull<Node<SharedInner<T>>>,
     pub(crate) phantom: PhantomData<SharedInner<T>>,
 }
 
-pub(crate) struct SharedInner<T> {
+pub(crate) struct SharedInner<T: ?Sized> {
     count: AtomicUsize,
     data: T,
 }
 
-unsafe impl<T: Send + Sync> Send for Shared<T> {}
-unsafe impl<T: Send + Sync> Sync for Shared<T> {}
+unsafe impl<T: Send + Sync + ?Sized> Send for Shared<T> {}
+unsafe impl<T: Send + Sync + ?Sized> Sync for Shared<T> {}
 
 impl<T: Send + 'static> Shared<T> {
     /// Constructs a new `Shared<T>`.
@@ -51,7 +54,7 @@ impl<T: Send + 'static> Shared<T> {
     }
 }
 
-impl<T> Shared<T> {
+impl<T: ?Sized> Shared<T> {
     /// Returns a mutable reference to the contained value if there are no
     /// other extant `Shared` pointers to the same allocation; otherwise
     /// returns `None`.
@@ -80,7 +83,7 @@ impl<T> Shared<T> {
     }
 }
 
-impl<T> Clone for Shared<T> {
+impl<T: ?Sized> Clone for Shared<T> {
     fn clone(&self) -> Self {
         unsafe {
             self.node.as_ref().data.count.fetch_add(1, Ordering::Relaxed);
@@ -90,7 +93,7 @@ impl<T> Clone for Shared<T> {
     }
 }
 
-impl<T> Deref for Shared<T> {
+impl<T: ?Sized> Deref for Shared<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -98,7 +101,7 @@ impl<T> Deref for Shared<T> {
     }
 }
 
-impl<T> Drop for Shared<T> {
+impl<T: ?Sized> Drop for Shared<T> {
     fn drop(&mut self) {
         unsafe {
             let count = self.node.as_ref().data.count.fetch_sub(1, Ordering::Release);
@@ -115,7 +118,19 @@ impl<T> Drop for Shared<T> {
 mod tests {
     use crate::{Collector, Shared};
 
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::{any::Any, sync::atomic::{AtomicUsize, Ordering}};
+
+    #[test]
+    fn unsize_dyn() {
+        let mut collector = Collector::new();
+        let shared: Shared<[u8]> = Shared::new(&collector.handle(), [0, 1, 2, 3]);
+        let any: Shared<dyn Any> = Shared::new(&collector.handle(), 3u8);
+
+        drop(shared);
+        drop(any);
+        collector.collect();
+        assert!(collector.try_cleanup().is_ok());
+    }
 
     #[test]
     fn shared() {
