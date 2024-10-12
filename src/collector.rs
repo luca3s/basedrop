@@ -34,13 +34,13 @@ pub struct Node<T: ?Sized> {
     /// Isn't `Node<T>` as that prohibits unsize coercion
     ///
     /// All fat pointers in Rust are the same size, so this works also for dyn
-    self_ptr: MaybeUninit<[u8; size_of::<&[()]>()]>,
+    self_ptr: MaybeUninit<*const [()]>,
     /// The data stored in this allocation.
     pub data: T,
 }
 
 unsafe fn drop_node<T: ?Sized>(node: *mut NodeHeader) {
-    /// This value is the same for every T
+    // This value is the same for every T
     let self_ptr_offset = const {
         offset_of!(Node<T>, self_ptr)
     };
