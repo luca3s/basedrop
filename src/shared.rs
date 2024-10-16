@@ -1,10 +1,16 @@
 use crate::{Handle, Node};
+use core::alloc::Layout;
 use core::marker::SmartPointer;
 
 use core::marker::PhantomData;
 use core::ops::Deref;
+use core::ptr::addr_of;
+use core::ptr::addr_of_mut;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering, fence};
+
+extern crate alloc;
+use alloc::boxed::Box;
 
 /// A reference-counted smart pointer with deferred collection, analogous to
 /// `Arc`.
@@ -50,6 +56,49 @@ impl<T: Send + 'static> Shared<T> {
                 }))
             },
             phantom: PhantomData,
+        }
+    }
+}
+
+impl<T: Send + ?Sized + 'static> Shared<T> {
+    pub fn new_from_box(handle: &Handle, data: Box<T>) -> Self {
+        let size = size_of_val(&*data);
+        let layout = Layout::new::<Node<SharedInner<()>>>()
+            .extend(Layout::for_value(&*data))
+            .unwrap()
+            .0
+            .pad_to_align();
+
+        let ptr = unsafe { alloc::alloc::alloc(layout) };
+        if ptr.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+
+        let node: *mut Node<SharedInner<T>> = ptr.with_metadata_of(addr_of!(*data) as *const Node<SharedInner<T>>);
+        unsafe {
+            // init Node except for data
+            Node::<SharedInner<T>>::init_header(node, handle);
+
+            // init the counter
+            addr_of_mut!((*node).data.count).write(AtomicUsize::new(1));
+
+            // copy data as bytes
+            core::ptr::copy_nonoverlapping(
+                addr_of!(*data) as *const u8,
+                addr_of_mut!((*node).data.data) as *mut u8,
+                size,
+            );
+
+            // drop data by only deallocating, but not dropping
+            let src_ptr = addr_of!(*data);
+            core::mem::forget(data);
+            let src = Box::from_raw(src_ptr as *mut core::mem::ManuallyDrop<T>);
+            drop(src);
+        }
+
+        Shared {
+            node: unsafe { NonNull::new_unchecked(node) },
+            phantom: PhantomData
         }
     }
 }

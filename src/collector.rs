@@ -1,4 +1,6 @@
+use core::alloc::Layout;
 use core::mem::{offset_of, ManuallyDrop, MaybeUninit};
+use core::ptr::{addr_of, addr_of_mut};
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 extern crate alloc;
@@ -82,7 +84,54 @@ impl<T: Send + 'static> Node<T> {
     }
 }
 
+impl<T: Send + ?Sized + 'static> Node<T> {
+    pub fn alloc_from_box(handle: &Handle, data: Box<T>) -> *mut Node<T> {
+        let size = size_of_val(&*data);
+        let layout = Layout::new::<Node<()>>()
+            .extend(Layout::for_value(&*data))
+            .unwrap()
+            .0
+            .pad_to_align();
+
+        let ptr = unsafe { alloc::alloc::alloc(layout) };
+        if ptr.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+
+        let node: *mut Node<T> = ptr.with_metadata_of(addr_of!(*data) as *const Node<T>);
+        unsafe {
+            // init Node except for data
+            Self::init_header(node, handle);
+
+            // copy data as bytes
+            core::ptr::copy_nonoverlapping(
+                addr_of!(*data) as *const u8,
+                addr_of_mut!((*node).data) as *mut u8,
+                size,
+            );
+
+            // drop data by only deallocating, but not dropping
+            let src_ptr = addr_of!(*data);
+            core::mem::forget(data);
+            let src = Box::from_raw(src_ptr as *mut core::mem::ManuallyDrop<T>);
+            drop(src);
+        }
+
+        node
+    }
+}
+
 impl<T: ?Sized> Node<T> {
+    /// Writes the NodeHeader, does not write the data
+    pub(crate) unsafe fn init_header(this: *mut Node<T>, handle: &Handle) {
+        addr_of_mut!((*this).header).write(NodeHeader {
+            link: NodeLink {
+                collector: handle.collector,
+            },
+            drop: drop_node::<T>,
+        });
+    }
+
     /// Adds a `Node` to its associated [`Collector`]'s drop queue. The `Node`
     /// and its contained data may be dropped at a later time when
     /// [`Collector::collect`] or [`Collector::collect_one`] is called.

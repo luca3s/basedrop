@@ -1,9 +1,11 @@
 use crate::{Handle, Node};
 
-use core::marker::SmartPointer;
 use core::marker::PhantomData;
+use core::marker::SmartPointer;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
+
+extern crate alloc;
 
 /// An owned smart pointer with deferred collection, analogous to `Box`.
 ///
@@ -42,7 +44,16 @@ impl<T: Send + 'static> Owned<T> {
     }
 }
 
-impl<T: Clone + Send + 'static + ?Sized> Clone for Owned<T> {
+impl<T: Send + ?Sized + 'static> Owned<T> {
+    pub fn from_box(handle: &Handle, data: alloc::boxed::Box<T>) -> Self {
+        Owned {
+            node: unsafe { NonNull::new_unchecked(Node::alloc_from_box(handle, data)) },
+            phantom: PhantomData
+        }
+    }
+}
+
+impl<T: Clone + Send + ?Sized + 'static> Clone for Owned<T> {
     fn clone(&self) -> Self {
         let handle = unsafe { Node::handle(self.node.as_ptr()) };
         Owned::new(&handle, self.deref().clone())
