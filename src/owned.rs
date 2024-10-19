@@ -53,7 +53,7 @@ impl<T: Send + ?Sized + 'static> Owned<T> {
     }
 }
 
-impl<T: Clone + Send + ?Sized + 'static> Clone for Owned<T> {
+impl<T: Clone + Send + 'static> Clone for Owned<T> {
     fn clone(&self) -> Self {
         let handle = unsafe { Node::handle(self.node.as_ptr()) };
         Owned::new(&handle, self.deref().clone())

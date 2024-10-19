@@ -4,8 +4,7 @@ use core::marker::SmartPointer;
 
 use core::marker::PhantomData;
 use core::ops::Deref;
-use core::ptr::addr_of;
-use core::ptr::addr_of_mut;
+
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering, fence};
 
@@ -61,44 +60,37 @@ impl<T: Send + 'static> Shared<T> {
 }
 
 impl<T: Send + ?Sized + 'static> Shared<T> {
-    pub fn new_from_box(handle: &Handle, data: Box<T>) -> Self {
-        let size = size_of_val(&*data);
-        let layout = Layout::new::<Node<SharedInner<()>>>()
-            .extend(Layout::for_value(&*data))
-            .unwrap()
-            .0
-            .pad_to_align();
-
-        let ptr = unsafe { alloc::alloc::alloc(layout) };
-        if ptr.is_null() {
-            alloc::alloc::handle_alloc_error(layout);
-        }
-
-        let node: *mut Node<SharedInner<T>> = ptr.with_metadata_of(addr_of!(*data) as *const Node<SharedInner<T>>);
+    pub fn from_box(handle: &Handle, data: Box<T>) -> Self {
         unsafe {
-            // init Node except for data
-            Node::<SharedInner<T>>::init_header(node, handle);
-
-            // init the counter
-            addr_of_mut!((*node).data.count).write(AtomicUsize::new(1));
-
-            // copy data as bytes
-            core::ptr::copy_nonoverlapping(
-                addr_of!(*data) as *const u8,
-                addr_of_mut!((*node).data.data) as *mut u8,
-                size,
+            let src_ptr = &raw const *data;
+            let node = Node::<SharedInner<T>>::alloc_for_layout(
+                handle,
+                Layout::for_value(&*data),
+                |mem| {
+                    // equivalent to ptr::with_metdata_of(other), but on stable
+                    let offset = mem.byte_offset_from(src_ptr);
+                    let src_ptr = src_ptr as *const Node<SharedInner<T>>;
+                    src_ptr.byte_offset(offset).cast_mut()
+                },
             );
 
-            // drop data by only deallocating, but not dropping
-            let src_ptr = addr_of!(*data);
+            // init the share count
+            (&raw mut (*node).data.count).write(AtomicUsize::new(1));
+            // copy the data
+            core::ptr::copy_nonoverlapping(
+                src_ptr as *const u8,
+                (&raw mut (*node).data.data) as *mut u8,
+                size_of_val(&*data),
+            );
+            // drop the box, without dropping the value inside the box
             core::mem::forget(data);
             let src = Box::from_raw(src_ptr as *mut core::mem::ManuallyDrop<T>);
             drop(src);
-        }
 
-        Shared {
-            node: unsafe { NonNull::new_unchecked(node) },
-            phantom: PhantomData
+            Shared {
+                node: NonNull::new_unchecked(node),
+                phantom: PhantomData,
+            }
         }
     }
 }
@@ -167,7 +159,14 @@ impl<T: ?Sized> Drop for Shared<T> {
 mod tests {
     use crate::{Collector, Shared};
 
-    use core::{any::Any, sync::atomic::{AtomicUsize, Ordering}};
+    extern crate alloc;
+
+    use core::{
+        any::Any,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use alloc::boxed::Box;
 
     #[test]
     fn unsize_dyn() {
@@ -177,6 +176,25 @@ mod tests {
 
         drop(shared);
         drop(any);
+        collector.collect();
+        assert!(collector.try_cleanup().is_ok());
+    }
+
+    #[test]
+    fn from_unsize_box() {
+        let mut collector = Collector::new();
+        let slice_box: Box<[i32]> = Box::new([0, 1, 2, 3]);
+
+        // here the trait needs to require T: Send. otherwise creation of Shared not possible.
+        // when a useful trait is wanted it should be implemented by requiring Send on every implementor of the trait
+        // or by creating a dummy trait that just combines Send with the wanted trait
+        let dyn_box: Box<dyn Send> = Box::new(25);
+
+        let shared_slice = Shared::from_box(&collector.handle(), slice_box);
+        let shared_dyn = Shared::from_box(&collector.handle(), dyn_box);
+
+        drop(shared_slice);
+        drop(shared_dyn);
         collector.collect();
         assert!(collector.try_cleanup().is_ok());
     }
