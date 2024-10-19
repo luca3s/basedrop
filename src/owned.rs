@@ -1,7 +1,6 @@
 use crate::{Handle, Node};
 
 use core::marker::PhantomData;
-use core::marker::SmartPointer;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 
@@ -16,9 +15,8 @@ extern crate alloc;
 ///
 /// [`Collector`]: crate::Collector
 /// [`Handle`]: crate::Handle
-#[derive(SmartPointer)]
 #[repr(transparent)]
-pub struct Owned<#[pointee] T: ?Sized> {
+pub struct Owned<T: ?Sized> {
     node: NonNull<Node<T>>,
     phantom: PhantomData<T>,
 }
@@ -79,23 +77,5 @@ impl<T: ?Sized> Drop for Owned<T> {
         unsafe {
             Node::queue_drop(self.node.as_ptr());
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use core::any::Any;
-    use crate::{Collector, Owned};
-
-    #[test]
-    fn unsize_dyn() {
-        let mut collector = Collector::new();
-        let shared: Owned<[u8]> = Owned::new(&collector.handle(), [0, 1, 2, 3]);
-        let any: Owned<dyn Any> = Owned::new(&collector.handle(), 3u8);
-
-        drop(shared);
-        drop(any);
-        collector.collect();
-        assert!(collector.try_cleanup().is_ok());
     }
 }

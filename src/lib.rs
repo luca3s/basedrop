@@ -16,7 +16,6 @@
 //! [`SharedCell`]: crate::SharedCell
 
 #![no_std]
-#![feature(derive_smart_pointer)]
 
 mod collector;
 mod owned;

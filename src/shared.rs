@@ -1,6 +1,5 @@
 use crate::{Handle, Node};
 use core::alloc::Layout;
-use core::marker::SmartPointer;
 
 use core::marker::PhantomData;
 use core::ops::Deref;
@@ -21,9 +20,8 @@ use alloc::boxed::Box;
 ///
 /// [`Collector`]: crate::Collector
 /// [`Handle`]: crate::Handle
-#[derive(SmartPointer)]
 #[repr(transparent)]
-pub struct Shared<#[pointee] T: ?Sized> {
+pub struct Shared<T: ?Sized> {
     pub(crate) node: NonNull<Node<SharedInner<T>>>,
     pub(crate) phantom: PhantomData<SharedInner<T>>,
 }
@@ -161,24 +159,9 @@ mod tests {
 
     extern crate alloc;
 
-    use core::{
-        any::Any,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use alloc::boxed::Box;
-
-    #[test]
-    fn unsize_dyn() {
-        let mut collector = Collector::new();
-        let shared: Shared<[u8]> = Shared::new(&collector.handle(), [0, 1, 2, 3]);
-        let any: Shared<dyn Any> = Shared::new(&collector.handle(), 3u8);
-
-        drop(shared);
-        drop(any);
-        collector.collect();
-        assert!(collector.try_cleanup().is_ok());
-    }
 
     #[test]
     fn from_unsize_box() {
