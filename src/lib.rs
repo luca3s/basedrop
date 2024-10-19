@@ -17,7 +17,6 @@
 
 #![no_std]
 #![feature(derive_smart_pointer)]
-#![feature(set_ptr_value)]
 
 mod collector;
 mod owned;
