@@ -1,13 +1,28 @@
-use core::mem::ManuallyDrop;
+use core::alloc::Layout;
+use core::mem::{ManuallyDrop, MaybeUninit};
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 extern crate alloc;
 use alloc::boxed::Box;
 
 #[repr(C)]
-struct NodeHeader {
+pub(crate) struct NodeHeader {
     link: NodeLink,
+    /// stores the meta_data needed for unsized. With nightly feature ptr_metadata this could just be the metadata.
+    /// initialized when the data is put into the drop queue. Needs the Node to not move, but this is already given with the library design
+    /// Isn't `Node<T>` as that prohibits unsize coercion
+    ///
+    /// All fat pointers in Rust are the same size, so this works also for dyn. When PtrMetadata API is stablised this should use it.
+    self_ptr: MaybeUninit<*mut [()]>,
     drop: unsafe fn(*mut NodeHeader),
+}
+
+impl NodeHeader {
+    /// SAFETY: this ptr needs to be valid and self_ptr in NodeHeader has to be initialized.
+    /// T has to be equal to T that the NodeHeader was initialized with.
+    pub(crate) unsafe fn get_node_ptr<T: ?Sized>(this: *mut NodeHeader) -> *mut Node<T> {
+        core::mem::transmute_copy(&(*this).self_ptr)
+    }
 }
 
 #[repr(C)]
@@ -27,14 +42,16 @@ union NodeLink {
 /// [`Owned`]: crate::Owned
 /// [`Shared`]: crate::Shared
 #[repr(C)]
-pub struct Node<T> {
+pub struct Node<T: ?Sized> {
     header: NodeHeader,
     /// The data stored in this allocation.
     pub data: T,
 }
 
-unsafe fn drop_node<T>(node: *mut NodeHeader) {
-    let _ = Box::from_raw(node as *mut Node<T>);
+unsafe fn drop_node<T: ?Sized>(node: *mut NodeHeader) {
+    // self_ptr is initialized by drop_node. If T: Sized only reads the first half of self_ptr. Rest is uninit
+    let self_ptr = NodeHeader::get_node_ptr(node);
+    let _: Box<Node<T>> = Box::from_raw(self_ptr);
 }
 
 impl<T: Send + 'static> Node<T> {
@@ -61,6 +78,7 @@ impl<T: Send + 'static> Node<T> {
                 link: NodeLink {
                     collector: handle.collector,
                 },
+                self_ptr: MaybeUninit::uninit(),
                 drop: drop_node::<T>,
             },
             data,
@@ -68,7 +86,76 @@ impl<T: Send + 'static> Node<T> {
     }
 }
 
-impl<T> Node<T> {
+impl<T: Send + ?Sized + 'static> Node<T> {
+    pub fn alloc_from_box(handle: &Handle, data: Box<T>) -> *mut Node<T> {
+        unsafe {
+            let src_ptr = &raw const *data;
+            let node = Self::alloc_for_layout(handle, Layout::for_value(&*data), |mem| {
+                // equivalent to ptr::with_metdata_of(other), but on stable
+                let offset = mem.byte_offset_from(src_ptr);
+                let src_ptr: *const Node<T> = src_ptr as *const Node<T>;
+                src_ptr.byte_offset(offset).cast_mut()
+            });
+
+            let size = size_of_val(&*data);
+            // move data
+            core::ptr::copy_nonoverlapping(
+                src_ptr as *const u8,
+                (&raw mut (*node).data).cast(),
+                size,
+            );
+            core::mem::forget(data);
+            let src_ptr = src_ptr as *mut core::mem::ManuallyDrop<T>;
+            let src: Box<ManuallyDrop<T>> = Box::from_raw(src_ptr);
+            drop(src);
+            node
+        }
+    }
+}
+
+impl<T: ?Sized> Node<T> {
+    /// T in Node isn't initialized.
+    /// This function increases the alloc counter of the collector.
+    ///
+    /// # convert_ptr
+    /// needs to add any needed metadata. the returned ptr must point to the same location.
+    /// This is needed to support creation of Node<Shared<T>>.
+    pub(crate) unsafe fn alloc_for_layout(
+        handle: &Handle,
+        layout: Layout,
+        // is a function, because then it can also create Shared Nodes
+        convert_ptr: impl FnOnce(*mut u8) -> *mut Node<T>,
+    ) -> *mut Node<T> {
+        let node_layout = Layout::new::<Node<()>>()
+            .extend(layout)
+            .unwrap()
+            .0
+            .pad_to_align();
+
+        // increase the alloc count directly before allocating
+        unsafe {
+            (*handle.collector).allocs.fetch_add(1, Ordering::Relaxed);
+        }
+        let mem_ptr = alloc::alloc::alloc(node_layout);
+        if mem_ptr.is_null() {
+            alloc::alloc::handle_alloc_error(node_layout);
+        }
+
+        let node_ptr = convert_ptr(mem_ptr);
+        // debug assert that convert_ptr holds at least that requirement.
+        debug_assert!(node_ptr.byte_offset_from(mem_ptr) == 0);
+
+        // init the NodeHeader
+        (&raw mut (*node_ptr).header).write(NodeHeader {
+            link: NodeLink {
+                collector: handle.collector,
+            },
+            drop: drop_node::<T>,
+            self_ptr: MaybeUninit::uninit(),
+        });
+        node_ptr
+    }
+
     /// Adds a `Node` to its associated [`Collector`]'s drop queue. The `Node`
     /// and its contained data may be dropped at a later time when
     /// [`Collector::collect`] or [`Collector::collect_one`] is called.
@@ -95,10 +182,25 @@ impl<T> Node<T> {
     /// [`Collector::collect_one`]: crate::Collector::collect_one
     /// [`Node::alloc`]: crate::Node::alloc
     pub unsafe fn queue_drop(node: *mut Node<T>) {
+        Self::write_self_ptr(node);
         let collector = (*node).header.link.collector;
         (*node).header.link.next = ManuallyDrop::new(AtomicPtr::new(core::ptr::null_mut()));
         let tail = (*collector).tail.swap(node as *mut NodeHeader, Ordering::AcqRel);
         (*tail).link.next.store(node as *mut NodeHeader, Ordering::Release);
+    }
+
+    /// Prepare the node for being shared via AtomicPtr.
+    /// Needed to drop it and to share it via SharedCell.
+    /// Moving the Node after calling this method deinitializes self_ptr again.
+    /// 
+    /// SAFETY: node ptr needs to be valid.
+    pub(crate) unsafe fn write_self_ptr(node: *mut Node<T>) {
+        (*node)
+            .header
+            .self_ptr
+            .as_mut_ptr()
+            .cast::<*mut Node<T>>()
+            .write(node);
     }
 
     /// Gets a [`Handle`] to this `Node`'s associated [`Collector`].
@@ -183,6 +285,7 @@ impl Collector {
                 link: NodeLink {
                     next: ManuallyDrop::new(AtomicPtr::new(core::ptr::null_mut())),
                 },
+                self_ptr: MaybeUninit::uninit(),
                 drop: drop_node::<()>,
             },
             data: (),
@@ -356,6 +459,38 @@ mod tests {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn unsize() {
+        let mut collector = Collector::new();
+        let node: *mut Node<[u8]> = Node::alloc(&collector.handle(), [0, 1, 2, 3]);
+        unsafe { Node::queue_drop(node); }
+        collector.collect();
+        assert!(collector.try_cleanup().is_ok());
+    }
+
+    #[test]
+    fn dyn_coercion() {
+        let mut collector = Collector::new();
+        let node: *mut Node<dyn core::any::Any> = Node::alloc(&collector.handle(), 4u8);
+        unsafe {
+            Node::queue_drop(node);
+        }
+        collector.collect();
+        assert!(collector.try_cleanup().is_ok());
+    }
+
+    #[test]
+    fn from_box() {
+        let mut collector = Collector::new();
+        let boxed_slice: Box<[i32]> = Box::new([0, 1, 2, 3]);
+        let node = Node::alloc_from_box(&collector.handle(), boxed_slice);
+        unsafe {
+            Node::queue_drop(node);
+        }
+        collector.collect();
+        assert!(collector.try_cleanup().is_ok());
     }
 
     #[test]

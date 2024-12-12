@@ -1,10 +1,15 @@
 use crate::{Handle, Node};
+use core::alloc::Layout;
 
 use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::ops::Deref;
+
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering, fence};
+
+extern crate alloc;
+use alloc::boxed::Box;
 
 /// A reference-counted smart pointer with deferred collection, analogous to
 /// `Arc`.
@@ -16,18 +21,19 @@ use core::sync::atomic::{AtomicUsize, Ordering, fence};
 ///
 /// [`Collector`]: crate::Collector
 /// [`Handle`]: crate::Handle
-pub struct Shared<T> {
+#[repr(transparent)]
+pub struct Shared<T: ?Sized> {
     pub(crate) node: NonNull<Node<SharedInner<T>>>,
     pub(crate) phantom: PhantomData<SharedInner<T>>,
 }
 
-pub(crate) struct SharedInner<T> {
+pub(crate) struct SharedInner<T: ?Sized> {
     count: AtomicUsize,
     data: T,
 }
 
-unsafe impl<T: Send + Sync> Send for Shared<T> {}
-unsafe impl<T: Send + Sync> Sync for Shared<T> {}
+unsafe impl<T: Send + Sync + ?Sized> Send for Shared<T> {}
+unsafe impl<T: Send + Sync + ?Sized> Sync for Shared<T> {}
 
 impl<T: Send + 'static> Shared<T> {
     /// Constructs a new `Shared<T>`.
@@ -52,7 +58,43 @@ impl<T: Send + 'static> Shared<T> {
     }
 }
 
-impl<T> Shared<T> {
+impl<T: Send + ?Sized + 'static> Shared<T> {
+    pub fn from_box(handle: &Handle, data: Box<T>) -> Self {
+        unsafe {
+            let src_ptr = &raw const *data;
+            let node = Node::<SharedInner<T>>::alloc_for_layout(
+                handle,
+                Layout::for_value(&*data),
+                |mem| {
+                    // equivalent to ptr::with_metdata_of(other), but on stable
+                    let offset = mem.byte_offset_from(src_ptr);
+                    let src_ptr = src_ptr as *const Node<SharedInner<T>>;
+                    src_ptr.byte_offset(offset).cast_mut()
+                },
+            );
+
+            // init the share count
+            (&raw mut (*node).data.count).write(AtomicUsize::new(1));
+            // copy the data
+            core::ptr::copy_nonoverlapping(
+                src_ptr as *const u8,
+                (&raw mut (*node).data.data) as *mut u8,
+                size_of_val(&*data),
+            );
+            // drop the box, without dropping the value inside the box
+            core::mem::forget(data);
+            let src = Box::from_raw(src_ptr as *mut core::mem::ManuallyDrop<T>);
+            drop(src);
+
+            Shared {
+                node: NonNull::new_unchecked(node),
+                phantom: PhantomData,
+            }
+        }
+    }
+}
+
+impl<T: ?Sized> Shared<T> {
     /// Returns a mutable reference to the contained value if there are no
     /// other extant `Shared` pointers to the same allocation; otherwise
     /// returns `None`.
@@ -81,7 +123,7 @@ impl<T> Shared<T> {
     }
 }
 
-impl<T> Clone for Shared<T> {
+impl<T: ?Sized> Clone for Shared<T> {
     fn clone(&self) -> Self {
         unsafe {
             self.node.as_ref().data.count.fetch_add(1, Ordering::Relaxed);
@@ -91,7 +133,7 @@ impl<T> Clone for Shared<T> {
     }
 }
 
-impl<T> Deref for Shared<T> {
+impl<T: ?Sized> Deref for Shared<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -99,13 +141,13 @@ impl<T> Deref for Shared<T> {
     }
 }
 
-impl<T: Debug> Debug for Shared<T> {
+impl<T: Debug + ?Sized> Debug for Shared<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Shared").field("value", self.deref()).finish()
     }
 }
 
-impl<T> Drop for Shared<T> {
+impl<T: ?Sized> Drop for Shared<T> {
     fn drop(&mut self) {
         unsafe {
             let count = self.node.as_ref().data.count.fetch_sub(1, Ordering::Release);
@@ -124,6 +166,27 @@ mod tests {
     use crate::{Collector, Shared};
 
     use core::{sync::atomic::{AtomicUsize, Ordering}, fmt::Write};
+
+    use alloc::boxed::Box;
+
+    #[test]
+    fn from_unsize_box() {
+        let mut collector = Collector::new();
+        let slice_box: Box<[i32]> = Box::new([0, 1, 2, 3]);
+
+        // here the trait needs to require T: Send. otherwise creation of Shared not possible.
+        // when a useful trait is wanted it should be implemented by requiring Send on every implementor of the trait
+        // or by creating a dummy trait that just combines Send with the wanted trait
+        let dyn_box: Box<dyn Send> = Box::new(25);
+
+        let shared_slice = Shared::from_box(&collector.handle(), slice_box);
+        let shared_dyn = Shared::from_box(&collector.handle(), dyn_box);
+
+        drop(shared_slice);
+        drop(shared_dyn);
+        collector.collect();
+        assert!(collector.try_cleanup().is_ok());
+    }
 
     #[test]
     fn shared() {

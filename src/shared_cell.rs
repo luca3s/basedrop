@@ -1,4 +1,4 @@
-use crate::{Node, Shared, SharedInner};
+use crate::{Node, NodeHeader, Shared, SharedInner};
 
 use core::marker::PhantomData;
 use core::ptr::NonNull;
@@ -10,16 +10,16 @@ use core::sync::atomic::{fence, AtomicPtr, AtomicUsize, Ordering};
 /// somewhat higher overhead for writers.
 ///
 /// [`Shared<T>`]: crate::Shared
-pub struct SharedCell<T> {
+pub struct SharedCell<T: ?Sized> {
     readers: AtomicUsize,
-    node: AtomicPtr<Node<SharedInner<T>>>,
+    node: AtomicPtr<NodeHeader>,
     phantom: PhantomData<Shared<T>>,
 }
 
 unsafe impl<T: Send + Sync> Send for SharedCell<T> {}
 unsafe impl<T: Send + Sync> Sync for SharedCell<T> {}
 
-impl<T: Send + 'static> SharedCell<T> {
+impl<T: Send + ?Sized + 'static> SharedCell<T> {
     /// Constructs a new `SharedCell` containing `value`.
     ///
     /// # Examples
@@ -33,10 +33,11 @@ impl<T: Send + 'static> SharedCell<T> {
     pub fn new(value: Shared<T>) -> SharedCell<T> {
         let node = value.node.as_ptr();
         core::mem::forget(value);
+        unsafe { Node::write_self_ptr(node) };
 
         SharedCell {
             readers: AtomicUsize::new(0),
-            node: AtomicPtr::new(node),
+            node: AtomicPtr::new(node.cast()),
             phantom: PhantomData,
         }
     }
@@ -61,8 +62,10 @@ impl<T> SharedCell<T> {
     pub fn get(&self) -> Shared<T> {
         self.readers.fetch_add(1, Ordering::SeqCst);
 
+        let node: *mut Node<SharedInner<T>> = unsafe { NodeHeader::get_node_ptr(self.node.load(Ordering::SeqCst)) };
+
         let shared = Shared {
-            node: unsafe { NonNull::new_unchecked(self.node.load(Ordering::SeqCst)) },
+            node: unsafe { NonNull::new_unchecked(node) },
             phantom: PhantomData,
         };
         let copy = shared.clone();
@@ -112,11 +115,13 @@ impl<T> SharedCell<T> {
     pub fn replace(&self, value: Shared<T>) -> Shared<T> {
         let node = value.node.as_ptr();
         core::mem::forget(value);
+        unsafe { Node::write_self_ptr(node) };
 
-        let old = self.node.swap(node, Ordering::AcqRel);
+        let old = self.node.swap(node as *mut NodeHeader, Ordering::AcqRel);
         while self.readers.load(Ordering::Relaxed) != 0 {}
         fence(Ordering::Acquire);
 
+        let old = unsafe { NodeHeader::get_node_ptr(old) };
         Shared {
             node: unsafe { NonNull::new_unchecked(old) },
             phantom: PhantomData,
@@ -142,17 +147,19 @@ impl<T> SharedCell<T> {
     pub fn into_inner(mut self) -> Shared<T> {
         let node = core::mem::replace(&mut self.node, AtomicPtr::new(core::ptr::null_mut()));
         core::mem::forget(self);
+        let node = unsafe { NodeHeader::get_node_ptr(node.into_inner()) };
         Shared {
-            node: unsafe { NonNull::new_unchecked(node.into_inner()) },
+            node: unsafe { NonNull::new_unchecked(node) },
             phantom: PhantomData,
         }
     }
 }
 
-impl<T> Drop for SharedCell<T> {
+impl<T: ?Sized> Drop for SharedCell<T> {
     fn drop(&mut self) {
+        let node: *mut Node<SharedInner<T>> = unsafe { NodeHeader::get_node_ptr(self.node.load(Ordering::Relaxed)) };
         let _ = Shared {
-            node: unsafe { NonNull::new_unchecked(self.node.load(Ordering::Relaxed)) },
+            node: unsafe { NonNull::new_unchecked(node) },
             phantom: PhantomData,
         };
     }

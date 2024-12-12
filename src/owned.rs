@@ -5,6 +5,8 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 
+extern crate alloc;
+
 /// An owned smart pointer with deferred collection, analogous to `Box`.
 ///
 /// When an `Owned<T>` is dropped, its contents are added to the drop queue
@@ -14,13 +16,14 @@ use core::ptr::NonNull;
 ///
 /// [`Collector`]: crate::Collector
 /// [`Handle`]: crate::Handle
-pub struct Owned<T> {
+#[repr(transparent)]
+pub struct Owned<T: ?Sized> {
     node: NonNull<Node<T>>,
     phantom: PhantomData<T>,
 }
 
-unsafe impl<T: Send> Send for Owned<T> {}
-unsafe impl<T: Sync> Sync for Owned<T> {}
+unsafe impl<T: Send + ?Sized> Send for Owned<T> {}
+unsafe impl<T: Sync + ?Sized> Sync for Owned<T> {}
 
 impl<T: Send + 'static> Owned<T> {
     /// Constructs a new `Owned<T>`.
@@ -40,6 +43,15 @@ impl<T: Send + 'static> Owned<T> {
     }
 }
 
+impl<T: Send + ?Sized + 'static> Owned<T> {
+    pub fn from_box(handle: &Handle, data: alloc::boxed::Box<T>) -> Self {
+        Owned {
+            node: unsafe { NonNull::new_unchecked(Node::alloc_from_box(handle, data)) },
+            phantom: PhantomData
+        }
+    }
+}
+
 impl<T: Clone + Send + 'static> Clone for Owned<T> {
     fn clone(&self) -> Self {
         let handle = unsafe { Node::handle(self.node.as_ptr()) };
@@ -47,7 +59,7 @@ impl<T: Clone + Send + 'static> Clone for Owned<T> {
     }
 }
 
-impl<T> Deref for Owned<T> {
+impl<T: ?Sized> Deref for Owned<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -55,19 +67,19 @@ impl<T> Deref for Owned<T> {
     }
 }
 
-impl<T> DerefMut for Owned<T> {
+impl<T: ?Sized> DerefMut for Owned<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut self.node.as_mut().data }
     }
 }
 
-impl<T: Debug> Debug for Owned<T> {
+impl<T: Debug + ?Sized> Debug for Owned<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Owned").field("value", &self.deref()).finish()
     }
 }
 
-impl<T> Drop for Owned<T> {
+impl<T: ?Sized> Drop for Owned<T> {
     fn drop(&mut self) {
         unsafe {
             Node::queue_drop(self.node.as_ptr());
