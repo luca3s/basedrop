@@ -143,7 +143,7 @@ impl<T: ?Sized> Deref for Shared<T> {
 
 impl<T: Debug + ?Sized> Debug for Shared<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Shared").field("value", self.deref()).finish()
+        f.debug_struct("Shared").field("value", &self.deref()).finish()
     }
 }
 
